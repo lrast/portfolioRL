@@ -1,0 +1,127 @@
+import torch
+
+import pytorch_lightning as pl
+
+from torch import nn, distributions
+from torch.utils.data import DataLoader
+
+from environment import AllocationMDP
+
+
+class PolicyLearning(pl.LightningModule):
+    """agent that learn policy by the REINFORCE algorithm"""
+    def __init__(self, utilityFn, **hyperparams):
+        super(PolicyLearning, self).__init__()
+
+        self.utilityFn = utilityFn
+
+        self.policyNet = nn.Sequential(
+                                nn.Linear(3, 10),
+                                nn.ReLU(),
+                                nn.Linear(10, 10),
+                                nn.ReLU(),
+                                nn.Linear(10, 2),
+                                nn.ReLU()
+                            )
+
+        # default values
+        hyperparameterValues = {
+            'lr': 1e-3,
+            'mu': 0.1,
+            'sigma': 0.1,
+            'timehorizon': 10,
+            'batch_size': 200,
+            'n_experiments': 10
+        }
+
+        hyperparameterValues.update(hyperparams)
+        self.save_hyperparameters(hyperparameterValues)
+
+    def forward(self, x):
+        """ Sample actions from the policy """
+        parameters = self.policyNet.forward(x) + 1E-16
+        return parameters
+
+    def sampleActions(self, state):
+        parameters = self.forward(state)
+        dists = distributions.beta.Beta(parameters[:, 0], parameters[:, 1])
+
+        return dists.sample()[:, None]
+
+    def log_likelihood(self, states, actions):
+        """ Returns the log-likelihood of given actions at given states
+            The batching can have any shape, but we assume that 
+        """
+        parameters = self.forward(states)
+        dists = distributions.beta.Beta(parameters[..., 0:1], parameters[..., 1:2])
+        return dists.log_prob(actions)
+
+    def training_step(self, batch, batch_id):
+        """Run a new epoch, apply the REINFORCE algorithm"""
+
+        # run new epoch
+        self.E.initRun(self.hparams.batch_size)
+
+        stop = False
+        while not stop:
+            state = self.E.state
+            actions = self.sampleActions(state)
+            stop = self.E.evolveState(actions)
+
+        loss = -self.utilityFn(self.E.reward[:, :, None]) * \
+            self.log_likelihood(self.E.stateTrace, self.E.actionTrace)
+        return loss.sum()
+
+    def setup(self, stage):
+        """Initialize the environment"""
+        self.E = AllocationMDP(self.hparams.timehorizon, self.hparams.mu,
+                               self.hparams.sigma)
+
+    def train_dataloader(self):
+        """For now, we have no experience buffer, so the DL is empty"""
+        return DataLoader(range(self.hparams.n_experiments))
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=1e-3)
+
+
+
+# IN DEVELOPMENT
+class Vlearner(pl.LightningModule):
+    """value learning agent. IN DEVELOPMENT"""
+    def __init__(self, utilityFn):
+        super(Vlearner, self).__init__()
+
+        self.utilityFn = utilityFn
+
+        # the state is determined by two balances and the time
+        self.VNetwork = nn.Sequential(
+                                  nn.Linear(3, 10),
+                                  nn.ReLU(),
+                                  nn.Linear(10,10),
+                                  nn.ReLU(),
+                                  nn.Linear(10, 1),
+                                  nn.Hardsigmoid()
+                                )
+
+    def Qvalues(self, states, actions):
+        """Q value can be determined from the corresponding V values by changing the allocations
+            while not evolving the time.
+         """
+        newAllocation = torch.stack([1-actions, actions])
+        newAssets = (state[:, 0:2].sum(1) * newAllocation).T
+        times = states[:, 2:3]
+
+        return self.VNetwork(torch.cat([newAssets, times], 1))
+
+    def optimalAction(self, state):
+        pass
+
+    def training_step(self, batch, batch_id):
+        pass
+
+    def forward(self, x):
+        pass
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=1e-3)

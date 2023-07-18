@@ -2,7 +2,7 @@ import torch
 import numpy as np
 
 
-class allocationMDP(object):
+class AllocationMDP(object):
     def __init__(self, timeHorizon, mu, sigma):
         """
             The time units are set here so that each timestep is 1
@@ -12,35 +12,49 @@ class allocationMDP(object):
         self.mu = mu
         self.sigma = sigma
 
-    def updateStateTrace(self, newState):
-        self.stateTrace = torch.cat([self.stateTrace, newState[:, :, None]], 2)
+    def updateTraces(self, newState, newAction):
+        if self.stateTrace is None:
+            self.stateTrace = newState[:, None, :].clone()
+        else:
+            self.stateTrace = torch.cat([self.stateTrace, newState[:, None, :]], 1)
+
+        if self.actionTrace is None:
+            self.actionTrace = newAction[:, None, :].clone()
+        else:
+            self.actionTrace = torch.cat([self.actionTrace, newAction[:, None, :]], 1)
 
     def initRun(self, Nsamples):
         """ Initialize a run """
         riskyAssets = torch.rand(Nsamples, 1)
-        self.assets = torch.cat([1-riskyAssets, riskyAssets], 1)
-        self.time = 0
+        assets = torch.cat([1-riskyAssets, riskyAssets], 1)
 
-        self.stateTrace = self.assets[:, :, None]
-        self.reward = torch.zeros(Nsample, 1)
+        self.time = 0.
+        self.state = torch.cat([assets, torch.zeros(Nsamples, 1)], 1)
+
+        self.stateTrace = None
+        self.actionTrace = None
+        self.reward = torch.zeros(Nsamples, 1)
 
     def evolveState(self, actions):
         """
         action: the percent of the portfolio allocated to the risky asset
         """
-        totalAssets = self.assets.sum(1)[:, None]
+        self.updateTraces(self.state, actions)
 
-        self.assets = torch.cat([(1.-actions)*totalAssets, actions*totalAssets], 1)
-        self.assets[:, 1] *= geometricBrownianMotion(self.mu, self.sigma, 1, 1, 
-                                                     reps=actions.shape[1]
-                                                     )[0, 1]
+        totalAssets = self.state[:, 0:2].sum(1)
 
-        self.updateStateTrace(self.assets)
         self.time += 1
+        self.state[:, 0] = (1.-actions[:, 0]) * totalAssets
+        self.state[:, 1] = actions[:, 0] * totalAssets * geometricBrownianMotion(
+                                                          self.mu, self.sigma,
+                                                          1, 1, 
+                                                          reps=actions.shape[1]
+                                                        )[:, 1]
+        self.state[:, 2] = self.time * torch.ones(actions.shape[0])
 
         if self.time == self.timeHorizon:
+            self.reward = self.state[:,0:2].sum(1)[:, None]
             return True
-            self.reward = self.assets.sum(1)[:, None]
         else:
             return False
 
