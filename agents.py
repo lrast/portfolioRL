@@ -10,10 +10,8 @@ from environment import AllocationMDP
 
 class PolicyLearning(pl.LightningModule):
     """agent that learn policy by the REINFORCE algorithm"""
-    def __init__(self, utilityFn, **hyperparams):
+    def __init__(self, **hyperparams):
         super(PolicyLearning, self).__init__()
-
-        self.utilityFn = utilityFn
 
         self.policyNet = nn.Sequential(
                                 nn.Linear(3, 10),
@@ -30,12 +28,25 @@ class PolicyLearning(pl.LightningModule):
             'mu': 0.1,
             'sigma': 0.1,
             'timehorizon': 10,
-            'batch_size': 200,
-            'n_experiments': 10
+            'batch_size': 500,
+            'n_experiments': 10,
+            'utilityFn': 'sqrt'
         }
 
         hyperparameterValues.update(hyperparams)
         self.save_hyperparameters(hyperparameterValues)
+
+        # extract the utility function
+        currentUtilityFn = self.hparams.utilityFn
+        if isinstance(currentUtilityFn, str):
+            self.utilityFn = {
+                'linear': lambda x: x,
+                'sqrt': lambda x: x**0.5,
+                'log': lambda x: torch.log(x)
+            }[currentUtilityFn]
+        else:
+            self.utilityFn = currentUtilityFn
+            self.save_hyperparameters({'utilityFn': currentUtilityFn.__doc__})
 
     def forward(self, x):
         """ Sample actions from the policy """
@@ -83,6 +94,8 @@ class PolicyLearning(pl.LightningModule):
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-3)
+
+
 
 
 
