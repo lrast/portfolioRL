@@ -2,8 +2,10 @@ import torch
 
 import pytorch_lightning as pl
 
-from torch import nn, distributions
+from torch import nn
+
 from torch.utils.data import DataLoader
+from torch.distributions.beta import Beta
 
 from environment import AllocationMDP
 
@@ -19,7 +21,7 @@ class PolicyLearning(pl.LightningModule):
                                 nn.Linear(10, 10),
                                 nn.ReLU(),
                                 nn.Linear(10, 2),
-                                nn.ReLU()
+                                SquareNlin()
                             )
 
         # default values
@@ -50,12 +52,12 @@ class PolicyLearning(pl.LightningModule):
 
     def forward(self, x):
         """ Sample actions from the policy """
-        parameters = self.policyNet.forward(x) + 1E-16
+        parameters = self.policyNet.forward(x)
         return parameters
 
     def sampleActions(self, state):
         parameters = self.forward(state)
-        dists = distributions.beta.Beta(parameters[:, 0], parameters[:, 1])
+        dists = Beta(parameters[:, 0], parameters[:, 1])
 
         return dists.sample()[:, None]
 
@@ -64,8 +66,14 @@ class PolicyLearning(pl.LightningModule):
             The batching can have any shape, but we assume that 
         """
         parameters = self.forward(states)
-        dists = distributions.beta.Beta(parameters[..., 0:1], parameters[..., 1:2])
+        dists = Beta(parameters[..., 0:1], parameters[..., 1:2])
         return dists.log_prob(actions)
+
+    def actionStatistics(self, states):
+        parameters = self.forward(states)
+        dists = Beta(parameters[..., 0:1], parameters[..., 1:2])
+
+        return dists.mean, dists.variance
 
     def training_step(self, batch, batch_id):
         """Run a new epoch, apply the REINFORCE algorithm"""
@@ -81,9 +89,15 @@ class PolicyLearning(pl.LightningModule):
 
         loss = -self.utilityFn(self.E.reward[:, :, None]) * \
             self.log_likelihood(self.E.stateTrace, self.E.actionTrace)
+
+        self.log('loss', loss.sum())
+        self.log('mean action', 
+                 self.actionStatistics(torch.tensor([0.5, 0.5, 0.])
+                                       )[0].detach()
+                 )
         return loss.sum()
 
-    def setup(self, stage):
+    def setup(self, stage=None):
         """Initialize the environment"""
         self.E = AllocationMDP(self.hparams.timehorizon, self.hparams.mu,
                                self.hparams.sigma)
@@ -96,6 +110,13 @@ class PolicyLearning(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=1e-3)
 
 
+class SquareNlin(nn.Module):
+    """docstring for squareNlin"""
+    def __init__(self):
+        super(SquareNlin, self).__init__()
+
+    def forward(self, x):
+        return x**2 + 1E-16
 
 
 

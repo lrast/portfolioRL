@@ -16,12 +16,16 @@ class AllocationMDP(object):
         if self.stateTrace is None:
             self.stateTrace = newState[:, None, :].clone()
         else:
-            self.stateTrace = torch.cat([self.stateTrace, newState[:, None, :]], 1)
+            self.stateTrace = torch.cat(
+                                    [self.stateTrace, newState[:, None, :]],
+                                    1)
 
         if self.actionTrace is None:
             self.actionTrace = newAction[:, None, :].clone()
         else:
-            self.actionTrace = torch.cat([self.actionTrace, newAction[:, None, :]], 1)
+            self.actionTrace = torch.cat(
+                                    [self.actionTrace, newAction[:, None, :]],
+                                    1)
 
     def initRun(self, Nsamples):
         """ Initialize a run """
@@ -45,15 +49,13 @@ class AllocationMDP(object):
 
         self.time += 1
         self.state[:, 0] = (1.-actions[:, 0]) * totalAssets
-        self.state[:, 1] = actions[:, 0] * totalAssets * geometricBrownianMotion(
-                                                          self.mu, self.sigma,
-                                                          1, 1, 
-                                                          reps=actions.shape[1]
-                                                        )[:, 1]
+        self.state[:, 1] = actions[:, 0] * totalAssets * \
+            geometricBrownianMotion(self.mu, self.sigma, 1, 1, 
+                                    reps=actions.shape[1])[:, 1]
         self.state[:, 2] = self.time * torch.ones(actions.shape[0])
 
         if self.time == self.timeHorizon:
-            self.reward = self.state[:,0:2].sum(1)[:, None]
+            self.reward = self.state[:, 0:2].sum(1)[:, None]
             return True
         else:
             return False
