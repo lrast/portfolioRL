@@ -1,11 +1,11 @@
 import wandb
 import torch
 
-from agents import PolicyLearning
+from agents import PolicyLearning, ConstantLearner
 
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 
 
 def initialCharacterization():
@@ -64,13 +64,14 @@ def basicTraining(model, dirname, **kwargs):
     wandb.finish()
 
 
-def runSweep(cfg):
+def runSweep(cfg, modelClass, **trainerKwargs):
     groupName = cfg['name']
 
     def initAndTrain():
         wandb.init(group=groupName)
 
-        model = PolicyLearning(**wandb.config)
+        model = modelClass(**wandb.config)
+
         targetdir = ''.join(
                 [groupName] +
                 ['-{key}{value}'.format(key=key, value=wandb.config[key])
@@ -78,16 +79,23 @@ def runSweep(cfg):
                  ])
 
         checkpoint_callback = ModelCheckpoint(
-                            dirpath=f'lightning_logs/{targetdir}',
-                            every_n_epochs=1
-                            )
+                        dirpath=f'lightning_logs/{groupName}Sweep/{targetdir}',
+                        every_n_epochs=1
+                        )
+        if 'callbacks' in trainerKwargs:
+            trainerKwargs['callbacks'].append(checkpoint_callback)
+        else:
+            trainerKwargs['callbacks'] = [checkpoint_callback]
+
+        if 'max_epochs' not in trainerKwargs:
+            trainerKwargs['max_epochs'] = 2000
+
         wandb_logger = WandbLogger()
 
         trainer = Trainer(
             logger=wandb_logger,
             log_every_n_steps=1,
-            max_epochs=2000,
-            callbacks=[checkpoint_callback]
+            **trainerKwargs
             )
         trainer.fit(model)
 
@@ -100,7 +108,7 @@ def runSweep(cfg):
 """ Sweep definitions """
 mean_sweep_0 = {
     'method': 'grid',
-    'name': 'dynamicSweep_mean',
+    'name': 'temp_name',
     'parameters':
     {
         'mu': {'values': torch.logspace(-3, -0.9, 12).tolist()},
@@ -108,3 +116,9 @@ mean_sweep_0 = {
         'utilityFn': {'values': ['sqrt']},
      }
 }
+
+earlyStopping_callback = EarlyStopping(monitor='total certainty', 
+                                       min_delta=-float('inf'),
+                                       stopping_threshold=100., mode='max')
+
+

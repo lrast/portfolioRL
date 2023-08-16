@@ -44,7 +44,8 @@ class PolicyLearning(pl.LightningModule):
             self.utilityFn = {
                 'linear': lambda x: x,
                 'sqrt': lambda x: x**0.5,
-                'log': lambda x: torch.log(x)
+                'log': lambda x: torch.log(x), 
+                '1000sqrt': lambda x: 1000*x**0.5
             }[currentUtilityFn]
         else:
             self.utilityFn = currentUtilityFn
@@ -119,6 +120,25 @@ class SquareNlin(nn.Module):
         return x**2 + 1E-16
 
 
+class ConstantLearner(PolicyLearning):
+    """Learns a constant policy output"""
+    def __init__(self, **hyperparameters):
+        super(ConstantLearner, self).__init__(**hyperparameters)
+
+        self.policyNet = nn.Sequential(nn.Linear(3, 2),
+                                       SquareNlin())
+        self.policyNet[0].weight = nn.Parameter(torch.zeros(2, 3), 
+                                                requires_grad=False)
+
+    def validation_step(self, batch, batch_id):
+        params = self.forward(torch.randn(1, 3))
+        self.log('total certainty', params.sum())
+
+    def val_dataloader(self):
+        return DataLoader([0])
+
+
+
 
 # IN DEVELOPMENT
 class Vlearner(pl.LightningModule):
@@ -132,7 +152,7 @@ class Vlearner(pl.LightningModule):
         self.VNetwork = nn.Sequential(
                                   nn.Linear(3, 10),
                                   nn.ReLU(),
-                                  nn.Linear(10,10),
+                                  nn.Linear(10, 10),
                                   nn.ReLU(),
                                   nn.Linear(10, 1),
                                   nn.Hardsigmoid()
