@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 from torch import nn
 
 from torch.utils.data import DataLoader
-from torch.distributions.beta import Beta
+from torch.distributions import Beta, kl_divergence
 
 from environment import AllocationMDP
 
@@ -27,11 +27,15 @@ class PolicyLearning(pl.LightningModule):
         # default values
         hyperparameterValues = {
             'lr': 1e-3,
-            'mu': 0.1,
-            'sigma': 0.1,
+            'regularization': 0,
+            'baseline': 'none',
+
             'timehorizon': 10,
             'batch_size': 500,
             'n_experiments': 10,
+
+            'mu': 0.1,
+            'sigma': 0.1,
             'utilityFn': 'sqrt'
         }
 
@@ -70,6 +74,19 @@ class PolicyLearning(pl.LightningModule):
         dists = Beta(parameters[..., 0:1], parameters[..., 1:2])
         return dists.log_prob(actions)
 
+    def KLregularizer(self, states):
+        """
+            KL divergence regularizer
+        """
+        parameters = self.forward(states)
+        currentParameters = parameters.detach()
+
+        currentDist = Beta(currentParameters[..., 0:1], 
+                           currentParameters[..., 1:2])
+        newDist = Beta(parameters[..., 0:1], parameters[..., 0:1])
+
+        return kl_divergence(currentDist, newDist)
+
     def actionStatistics(self, states):
         parameters = self.forward(states)
         dists = Beta(parameters[..., 0:1], parameters[..., 1:2])
@@ -79,8 +96,14 @@ class PolicyLearning(pl.LightningModule):
     def training_step(self, batch, batch_id):
         """Run a new epoch, apply the REINFORCE algorithm"""
 
+        batch_size_scheduler = self.hparams.batch_size
+        if isinstance(batch_size_scheduler, int):
+            batch_size = batch_size_scheduler
+        else:
+            batch_size = 200 + 10*batch_id
+
         # run new epoch
-        self.E.initRun(self.hparams.batch_size)
+        self.E.initRun(batch_size)
 
         stop = False
         while not stop:
@@ -91,15 +114,30 @@ class PolicyLearning(pl.LightningModule):
         loss = -self.utilityFn(self.E.reward[:, :, None]) * \
             self.log_likelihood(self.E.stateTrace, self.E.actionTrace)
 
-        self.log('loss', loss.sum())
+        if self.hparams.baseline == 'cashOut':
+            # use as a baseline value function the value of cashing out now
+            cashoutUtil = self.utilityFn(self.E.stateTrace[:, :, 0:2].sum(2))
+            actualUtil = self.utilityFn(
+                                        self.E.reward[:, :]
+                                        ).repeat((1, self.hparams.timehorizon))
+            loss = - (actualUtil - cashoutUtil)[:, :, None] * \
+                self.log_likelihood(self.E.stateTrace, self.E.actionTrace)
+
+        regularizer = self.hparams.regularization * \
+            self.KLregularizer(self.E.stateTrace)
+
+        self.log('loss', loss.mean())
+        self.log('meanUtility', self.utilityFn(self.E.reward).mean())
         self.log('mean action', 
                  self.actionStatistics(torch.tensor([0.5, 0.5, 0.])
                                        )[0].detach()
                  )
-        return loss.sum()
+
+        return (loss + regularizer).mean()
 
     def setup(self, stage=None):
         """Initialize the environment"""
+        print(self.hparams)
         self.E = AllocationMDP(self.hparams.timehorizon, self.hparams.mu,
                                self.hparams.sigma)
 
@@ -108,7 +146,8 @@ class PolicyLearning(pl.LightningModule):
         return DataLoader(range(self.hparams.n_experiments))
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-3)
+        return torch.optim.SGD(self.parameters(), lr=self.hparams.lr)
+        #return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
 
 class SquareNlin(nn.Module):
@@ -136,46 +175,3 @@ class ConstantLearner(PolicyLearning):
 
     def val_dataloader(self):
         return DataLoader([0])
-
-
-
-
-# IN DEVELOPMENT
-class Vlearner(pl.LightningModule):
-    """value learning agent. IN DEVELOPMENT"""
-    def __init__(self, utilityFn):
-        super(Vlearner, self).__init__()
-
-        self.utilityFn = utilityFn
-
-        # the state is determined by two balances and the time
-        self.VNetwork = nn.Sequential(
-                                  nn.Linear(3, 10),
-                                  nn.ReLU(),
-                                  nn.Linear(10, 10),
-                                  nn.ReLU(),
-                                  nn.Linear(10, 1),
-                                  nn.Hardsigmoid()
-                                )
-
-    def Qvalues(self, states, actions):
-        """Q value can be determined from the corresponding V values by changing the allocations
-            while not evolving the time.
-         """
-        newAllocation = torch.stack([1-actions, actions])
-        newAssets = (state[:, 0:2].sum(1) * newAllocation).T
-        times = states[:, 2:3]
-
-        return self.VNetwork(torch.cat([newAssets, times], 1))
-
-    def optimalAction(self, state):
-        pass
-
-    def training_step(self, batch, batch_id):
-        pass
-
-    def forward(self, x):
-        pass
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-3)
