@@ -3,7 +3,7 @@ import numpy as np
 
 
 class AllocationMDP(object):
-    def __init__(self, timeHorizon, mu, sigma):
+    def __init__(self, timeHorizon, mu, sigma, clipActions=False):
         """
             The time units are set here so that each timestep is 1
             This of course impacts the 
@@ -11,6 +11,7 @@ class AllocationMDP(object):
         self.timeHorizon = timeHorizon
         self.mu = mu
         self.sigma = sigma
+        self.clipActions = clipActions
 
     def updateTraces(self, newState, newAction):
         if self.stateTrace is None:
@@ -45,6 +46,15 @@ class AllocationMDP(object):
         """
         self.updateTraces(self.state, actions)
 
+        # note these actions are now recentered
+        if self.clipActions:
+            actions = torch.min(torch.max(
+                                 (actions + 1)/2.,
+                                 torch.zeros(actions.shape)
+                                ),
+                                torch.ones(actions.shape)
+                                )
+
         totalAssets = self.state[:, 0:2].sum(1)
 
         self.time += 1
@@ -56,6 +66,26 @@ class AllocationMDP(object):
 
         if self.time == self.timeHorizon:
             self.reward = self.state[:, 0:2].sum(1)[:, None]
+            return True
+        else:
+            return False
+
+
+class AllocationBandit(AllocationMDP):
+    """Stateless, simple allocation problem"""
+
+    def initRun(self, Nsamples):
+        super(AllocationBandit, self).initRun(Nsamples)
+        self.state[:, 2] = torch.randint(0, 10, (Nsamples,)).type(torch.float32)
+
+    def evolveState(self, actions):
+        """
+        action: the percent of the portfolio allocated to the risky asset
+        """
+        self.updateTraces(self.state, actions)
+
+        if self.time == self.timeHorizon:
+            self.reward = -(actions - 0.5)**2 + 0.25 + 0.1*torch.randn(actions.shape)
             return True
         else:
             return False

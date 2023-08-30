@@ -82,10 +82,12 @@ def runSweep(cfg, modelClass, **trainerKwargs):
                         dirpath=f'lightning_logs/{groupName}Sweep/{targetdir}',
                         every_n_epochs=1
                         )
-        if 'callbacks' in trainerKwargs:
-            trainerKwargs['callbacks'].append(checkpoint_callback)
-        else:
-            trainerKwargs['callbacks'] = [checkpoint_callback]
+
+        callbacks = trainerKwargs.get('callbacks', [])
+        callbacks.append(checkpoint_callback)
+
+        otherKwargs = {k: trainerKwargs[k]
+                       for k in trainerKwargs if k != 'callbacks'}
 
         if 'max_epochs' not in trainerKwargs:
             trainerKwargs['max_epochs'] = 2000
@@ -95,7 +97,8 @@ def runSweep(cfg, modelClass, **trainerKwargs):
         trainer = Trainer(
             logger=wandb_logger,
             log_every_n_steps=1,
-            **trainerKwargs
+            callbacks=callbacks,
+            **otherKwargs
             )
         trainer.fit(model)
 
@@ -120,5 +123,3 @@ mean_sweep_0 = {
 earlyStopping_callback = EarlyStopping(monitor='total certainty', 
                                        min_delta=-float('inf'),
                                        stopping_threshold=100., mode='max')
-
-
