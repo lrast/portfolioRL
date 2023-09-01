@@ -71,6 +71,26 @@ class AllocationMDP(object):
             return False
 
 
+class AllocationBandit(AllocationMDP):
+    """Stateless, simple allocation problem"""
+
+    def initRun(self, Nsamples):
+        super(AllocationBandit, self).initRun(Nsamples)
+        self.state[:, 2] = torch.randint(0, 10, (Nsamples,)).type(torch.float32)
+
+    def evolveState(self, actions):
+        """
+        action: the percent of the portfolio allocated to the risky asset
+        """
+        self.updateTraces(self.state, actions)
+
+        if self.time == self.timeHorizon:
+            self.reward = -(actions - 0.5)**2 + 0.25 + 0.1*torch.randn(actions.shape)
+            return True
+        else:
+            return False
+
+
 def geometricBrownianMotion(mu, sigma, dt, N, reps=1):
     """ Generate geometric Brownian motion S:
         dS = mu S dt + sigma S dW

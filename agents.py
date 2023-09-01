@@ -5,34 +5,31 @@ import pytorch_lightning as pl
 from torch import nn
 
 from torch.utils.data import DataLoader
-from torch.distributions import Beta, kl_divergence, Normal
+from torch.distributions import Beta
+from torch.special import polygamma
 
 from environment import AllocationMDP
 
 
-class PolicyLearning(pl.LightningModule):
+class BetaDistributionLearner(pl.LightningModule):
     """agent that learn policy by the REINFORCE algorithm"""
     def __init__(self, **hyperparams):
-        super(PolicyLearning, self).__init__()
+        super(BetaDistributionLearner, self).__init__()
 
         self.policyNet = nn.Sequential(
-                                nn.Linear(3, 10),
-                                nn.ReLU(),
-                                nn.Linear(10, 10),
-                                nn.ReLU(),
-                                nn.Linear(10, 2),
-                                SquareNlin()
-                            )
+                                nn.Embedding(10, 6),
+                                nn.Linear(6, 2),
+                                AbsNlin()
+                                )
 
         # default values
         hyperparameterValues = {
             'lr': 1e-3,
-            'regularization': 0,
-            'baseline': 'none',
+            'baseline': 'cashout',
 
             'timehorizon': 10,
-            'batch_size': 500,
-            'n_experiments': 10,
+            'batch_size': 5000,
+            'n_experiments': 100,
 
             'mu': 0.1,
             'sigma': 0.1,
@@ -46,19 +43,20 @@ class PolicyLearning(pl.LightningModule):
         currentUtilityFn = self.hparams.utilityFn
         if isinstance(currentUtilityFn, str):
             self.utilityFn = {
-                'linear': lambda x: x,
                 'sqrt': lambda x: x**0.5,
                 'log': lambda x: torch.log(x), 
-                '1000sqrt': lambda x: 1000*x**0.5
             }[currentUtilityFn]
         else:
             self.utilityFn = currentUtilityFn
             self.save_hyperparameters({'utilityFn': currentUtilityFn.__doc__})
 
-    def forward(self, x):
-        """ Sample actions from the policy """
-        parameters = self.policyNet.forward(x)
-        return parameters
+    """
+        Forward operation functions
+    """
+
+    def forward(self, states):
+        times = states[..., 2].type(torch.int)
+        return self.policyNet(times)
 
     def sampleActions(self, state):
         parameters = self.forward(state)
@@ -72,20 +70,7 @@ class PolicyLearning(pl.LightningModule):
         """
         parameters = self.forward(states)
         dists = Beta(parameters[..., 0:1], parameters[..., 1:2])
-        return dists.log_prob(actions)
-
-    def KLregularizer(self, states):
-        """
-            KL divergence regularizer
-        """
-        parameters = self.forward(states)
-        currentParameters = parameters.detach()
-
-        currentDist = Beta(currentParameters[..., 0:1], 
-                           currentParameters[..., 1:2])
-        newDist = Beta(parameters[..., 0:1], parameters[..., 0:1])
-
-        return kl_divergence(currentDist, newDist)
+        return dists.log_prob(actions), parameters
 
     def actionStatistics(self, states):
         parameters = self.forward(states)
@@ -93,17 +78,32 @@ class PolicyLearning(pl.LightningModule):
 
         return dists.mean, dists.variance
 
+    def InverseFisherInfo(self, parameters):
+        with torch.no_grad():
+            a = parameters[..., 0:1]
+            b = parameters[..., 1:2]
+            M11 = polygamma(1, a) - polygamma(1, a+b)
+            M12 = - polygamma(1, a+b)
+            M21 = - polygamma(1, a+b)
+            M22 = polygamma(1, b) - polygamma(1, a+b)
+
+            invDeterm = (1. / (M11 * M22 - M12 * M21))[..., None]
+            invFisherMatrices = invDeterm * torch.cat(
+                    [torch.cat([M22, -M12], dim=-1)[..., None],
+                     torch.cat([-M21, M22], dim=-1)[..., None]],
+                    dim=-1
+                )
+        return invFisherMatrices
+
+    """
+        Training 
+    """
+
     def training_step(self, batch, batch_id):
         """Run a new epoch, apply the REINFORCE algorithm"""
 
-        batch_size_scheduler = self.hparams.batch_size
-        if isinstance(batch_size_scheduler, int):
-            batch_size = batch_size_scheduler
-        else:
-            batch_size = 200 + 10*batch_id
-
         # run new epoch
-        self.E.initRun(batch_size)
+        self.E.initRun(self.hparams.batch_size)
 
         stop = False
         while not stop:
@@ -111,33 +111,49 @@ class PolicyLearning(pl.LightningModule):
             actions = self.sampleActions(state)
             stop = self.E.evolveState(actions)
 
-        loss = -self.utilityFn(self.E.reward[:, :, None]) * \
-            self.log_likelihood(self.E.stateTrace, self.E.actionTrace)
+        observedUtility = self.utilityFn(
+                                    self.E.reward[:, :]
+                                    ).repeat((1, self.hparams.timehorizon))
 
         if self.hparams.baseline == 'cashout':
             # use as a baseline value function the value of cashing out now
-            cashoutUtil = self.utilityFn(self.E.stateTrace[:, :, 0:2].sum(2))
-            actualUtil = self.utilityFn(
-                                        self.E.reward[:, :]
-                                        ).repeat((1, self.hparams.timehorizon))
-            loss = - (actualUtil - cashoutUtil)[:, :, None] * \
-                self.log_likelihood(self.E.stateTrace, self.E.actionTrace)
+            baseline = self.utilityFn(self.E.stateTrace[:, :, 0:2].sum(2))
+        else:
+            baseline = 0.
 
-        # regularizer = self.hparams.regularization * \
-        #    self.KLregularizer(self.E.stateTrace)
+        logProb, parameters = self.log_likelihood(self.E.stateTrace, 
+                                                  self.E.actionTrace)
+        loss = - (observedUtility - baseline)[:, :, None] * logProb
+
+        # make Fisher Information matrices for use in natural gradient descent
+        self.currentParameters = parameters
+        self.currentParameters.retain_grad()
 
         self.log('loss', loss.mean())
         self.log('meanUtility', self.utilityFn(self.E.reward).mean())
-        self.log('mean action', 
-                 self.actionStatistics(torch.tensor([0.5, 0.5, 0.])
-                                       )[0].detach()
-                 )
 
         return loss.mean()
 
+    def backward(self, loss, **kwargs):
+        loss.backward(retain_graph=True)
+        parameterGrads = self.currentParameters.grad
+        InverseFisher = self.InverseFisherInfo(self.currentParameters)
+
+        naturalGradients = torch.einsum('nmij, nmj -> nmi', 
+                                        InverseFisher, parameterGrads)
+
+        self.policyNet.zero_grad()
+        torch.autograd.backward(self.currentParameters, grad_tensors=naturalGradients)
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+
+    """
+        Data handling
+    """
+
     def setup(self, stage=None):
         """Initialize the environment"""
-        print(self.hparams)
         self.E = AllocationMDP(self.hparams.timehorizon, self.hparams.mu,
                                self.hparams.sigma)
 
@@ -145,111 +161,39 @@ class PolicyLearning(pl.LightningModule):
         """For now, we have no experience buffer, so the DL is empty"""
         return DataLoader(range(self.hparams.n_experiments))
 
-    def configure_optimizers(self):
-        return torch.optim.SGD(self.parameters(), lr=self.hparams.lr)
+    def validation_step(self, batch, batch_id):
+        params = self.forward(torch.arange(0, 10)[:, None].repeat(1, 3))
+        self.log('total certainty', params.sum(1).mean())
+        self.log('mean action', 
+                 self.actionStatistics(torch.tensor([0.5, 0.5, 0.])
+                                       )[0].detach()
+                 )
+
+    def val_dataloader(self):
+        return DataLoader([0])
 
 
-"""
+class ConstantBDLearner(BetaDistributionLearner):
+    """ConstantBDL is a beta distribution learner with a constant network"""
+    def __init__(self, **hyperparams):
+        super(ConstantBDLearner, self).__init__(**hyperparams)
 
-            Simple learners, policy learning subclasses
-
-"""
-
-
-class ConstantLearner(PolicyLearning):
-    """Learns a constant policy output"""
-    def __init__(self, **hyperparameters):
-        super(ConstantLearner, self).__init__(**hyperparameters)
-
-        self.policyNet = nn.Sequential(nn.Linear(3, 2),
-                                       SquareNlin())
-        self.policyNet[0].weight = nn.Parameter(torch.zeros(2, 3), 
+        self.policyNet = nn.Sequential(nn.Linear(3, 6),
+                                       nn.Linear(6, 2),
+                                       AbsNlin())
+        self.policyNet[0].weight = nn.Parameter(torch.zeros(6, 3), 
                                                 requires_grad=False)
+
+    def forward(self, states):
+        return self.policyNet(states)
 
     def validation_step(self, batch, batch_id):
         params = self.forward(torch.randn(1, 3))
         self.log('total certainty', params.sum())
-
-    def val_dataloader(self):
-        return DataLoader([0])
-
-
-class TimeLearner(PolicyLearning):
-    """TimeLearner: learns optimal policy taking into account only time"""
-    def __init__(self, **hyperparameters):
-        subclassDefaultHparams = {
-            'baseline': 'cashout'
-        }
-        subclassDefaultHparams.update(hyperparameters)
-        super(TimeLearner, self).__init__(**subclassDefaultHparams)
-
-        self.policyNet = nn.Sequential(
-                                nn.Embedding(10, 6),
-                                nn.Linear(6, 2),
-                                AbsNlin()
-                                )
-
-    def forward(self, states):
-        times = states[..., 2].type(torch.int)
-        return self.policyNet(times)
-
-    def validation_step(self, batch, batch_id):
-        params = self.forward(torch.arange(0, 10)[:, None].repeat(1, 3))
-        self.log('total certainty', params.sum(1).mean())
-
-    def val_dataloader(self):
-        return DataLoader([0])
-
-
-class GaussianTimeLearner(PolicyLearning):
-    """TimeLearner: learns optimal policy taking into account only time"""
-    def __init__(self, **hyperparameters):
-        subclassDefaultHparams = {
-            'baseline': 'cashout'
-        }
-        subclassDefaultHparams.update(hyperparameters)
-        super(GaussianTimeLearner, self).__init__(**subclassDefaultHparams)
-
-        self.policyNet = nn.Sequential(
-                                nn.Embedding(10, 6),
-                                nn.Linear(6, 2),
-                                )
-
-    def forward(self, states):
-        times = states[..., 2].type(torch.int)
-        return self.policyNet(times)
-
-    def sampleActions(self, state):
-        parameters = self.forward(state)
-        dists = Normal(parameters[:, 0], torch.abs(parameters[:, 1]))
-
-        return dists.sample()[:, None]
-
-    def log_likelihood(self, states, actions):
-        """ Returns the log-likelihood of given actions at given states
-            The batching can have any shape, but we assume that 
-        """
-        parameters = self.forward(states)
-        dists = Normal(parameters[..., 0:1], torch.abs(parameters[..., 1:2]))
-        return dists.log_prob(actions)
-
-    def actionStatistics(self, states):
-        parameters = self.forward(states)
-        dists = Normal(parameters[..., 0:1], torch.abs(parameters[..., 1:2]))
-
-        return dists.mean, dists.variance
-
-    def setup(self, stage=None):
-        """Initialize the environment"""
-        self.E = AllocationMDP(self.hparams.timehorizon, self.hparams.mu,
-                               self.hparams.sigma, clipActions=True)
-
-    def validation_step(self, batch, batch_id):
-        params = self.forward(torch.arange(0, 10)[:, None].repeat(1, 3))
-        self.log('total certainty', torch.abs(params[:, 1].mean()))
-
-    def val_dataloader(self):
-        return DataLoader([0])
+        self.log('mean action', 
+                 self.actionStatistics(torch.tensor([0.5, 0.5, 0.])
+                                       )[0].detach()
+                 )
 
 
 """
@@ -259,19 +203,10 @@ class GaussianTimeLearner(PolicyLearning):
 """
 
 
-class SquareNlin(nn.Module):
-    """docstring for squareNlin"""
-    def __init__(self):
-        super(SquareNlin, self).__init__()
-
-    def forward(self, x):
-        return x**2 + 1E-16
-
-
 class AbsNlin(nn.Module):
     """docstring for squareNlin"""
     def __init__(self):
         super(AbsNlin, self).__init__()
 
     def forward(self, x):
-        return torch.abs(x)
+        return torch.abs(x) + 1E-16
