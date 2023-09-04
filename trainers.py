@@ -56,12 +56,7 @@ mean_sweep_0 = {
     'name': 'temp_name',
     'parameters':
     {
-        'mu': {'values': torch.logspace(-3, -0.9, 12).tolist()},
+        'mu': {'values': torch.logspace(-2.5, -0.8, 8).tolist()},
         'sigma': {'values': [0.25]},
-        'utilityFn': {'values': ['sqrt']},
      }
 }
-
-earlyStopping_callback = EarlyStopping(monitor='total certainty', 
-                                       min_delta=-float('inf'),
-                                       stopping_threshold=100., mode='max')
